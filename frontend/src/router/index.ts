@@ -75,7 +75,10 @@ const routes: RouteRecordRaw[] = [
           error("Router", "Failed to load LogExplorer component", err);
           return { default: ComponentLoadError };
         }),
-        meta: { title: "Log Explorer" },
+        meta: { 
+          title: "Log Explorer",
+          keepAlive: true 
+        },
       },
       {
         path: "saved",

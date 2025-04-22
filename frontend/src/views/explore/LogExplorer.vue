@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount, onActivated, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { Button } from '@/components/ui/button'
 import { Plus, Play, RefreshCw, Share2, Keyboard, Save, CalendarIcon, Info, HelpCircle, Eraser } from 'lucide-vue-next'
@@ -741,8 +741,23 @@ const copyUrlToClipboard = () => {
   }
 }
 
+// Activated lifecycle hook for KeepAlive components
+onActivated(() => {
+  console.log("LogExplorer activated via KeepAlive");
+  
+  // Focus query editor when component is activated
+  nextTick(() => {
+    if (queryEditorRef.value) {
+      setTimeout(() => {
+        queryEditorRef.value?.focus(true);
+      }, 100);
+    }
+  });
+});
+
 // Component lifecycle with improved initialization sequence
 onMounted(async () => {
+  console.log("LogExplorer mounted");
   try {
     // Reset admin teams and load user teams to ensure we have the correct context
     teamsStore.resetAdminTeams();
@@ -1178,12 +1193,12 @@ const handleQueryExecution = async () => {
 </script>
 
 <template>
-  <KeepAlive>
-    <div class="log-explorer-wrapper">
-      <!-- Loading State -->
-      <div v-if="showLoadingState" class="flex items-center justify-center h-[calc(100vh-12rem)]">
-        <p class="text-muted-foreground animate-pulse">Loading Explorer...</p>
-      </div>
+  <div class="log-explorer-wrapper">
+      <div class="explorer-content-wrapper">
+        <!-- Loading State -->
+        <div v-if="showLoadingState" class="flex items-center justify-center h-[calc(100vh-12rem)]">
+          <p class="text-muted-foreground animate-pulse">Loading Explorer...</p>
+        </div>
 
       <!-- No Teams State -->
       <div v-else-if="showNoTeamsState"
@@ -1694,14 +1709,29 @@ const handleQueryExecution = async () => {
         content: exploreStore.activeMode === 'logchefql' ? exploreStore.logchefqlCode : exploreStore.rawSql
       })" @close="showSaveQueryModal = false" @save="handleSaveQuery" @update="handleUpdateQuery" />
       </div>
-    </div>
-  </KeepAlive>
+      </div>
+  </div>
 </template>
 
 <style scoped>
 .required::after {
   content: " *";
   color: hsl(var(--destructive));
+}
+
+/* Add styling to ensure proper size with KeepAlive */
+.log-explorer-wrapper {
+  height: 100%;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.explorer-content-wrapper {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
 }
 
 /* Add fade transition for the SQL preview */

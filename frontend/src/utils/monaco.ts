@@ -84,6 +84,126 @@ export function getSingleLineModeOptions(): Partial<monaco.editor.IStandaloneEdi
 // Track initialization state
 let setupComplete = false;
 
+// Global model cache to preserve models between component mounts
+interface ModelCacheEntry {
+  model: monaco.editor.ITextModel;
+  lastUsed: number;
+}
+const globalModelCache = new Map<string, ModelCacheEntry>();
+
+// Get or create model from global cache
+export function getOrCreateGlobalModel(id: string, value: string, language: string): monaco.editor.ITextModel {
+  try {
+    // Try to get from cache first
+    if (globalModelCache.has(id)) {
+      const entry = globalModelCache.get(id)!;
+      const model = entry.model;
+      
+      // Check if model is disposed before using it
+      if (model.isDisposed()) {
+        // Model was disposed, remove from cache
+        globalModelCache.delete(id);
+        // Fall through to create a new model
+      } else {
+        // Model is valid, update it
+        entry.lastUsed = Date.now();
+        
+        // Update content if it differs (prevents losing changes)
+        if (model.getValue() !== value) {
+          model.setValue(value);
+        }
+        
+        // Ensure language is set correctly (in case it changed)
+        if (model.getLanguageId() !== language) {
+          monaco.editor.setModelLanguage(model, language);
+        }
+        
+        return model;
+      }
+    }
+  } catch (e) {
+    // Handle any errors by removing the model from cache
+    console.warn("Error accessing cached model:", e);
+    globalModelCache.delete(id);
+    // Fall through to create a new model
+  }
+  
+  // Create new model and add to cache
+  const model = monaco.editor.createModel(value, language);
+  globalModelCache.set(id, {
+    model,
+    lastUsed: Date.now()
+  });
+  
+  // Clean up old models if cache gets too large (keep last 10)
+  if (globalModelCache.size > 10) {
+    cleanupOldModels();
+  }
+  
+  return model;
+}
+
+// Cleanup function for old models
+function cleanupOldModels() {
+  try {
+    // Convert to array for sorting
+    const entries = Array.from(globalModelCache.entries());
+    
+    // First pass: remove any disposed models
+    for (const [id, entry] of entries) {
+      try {
+        if (entry.model.isDisposed()) {
+          globalModelCache.delete(id);
+        }
+      } catch (e) {
+        // If we can't even check isDisposed, the model is definitely invalid
+        globalModelCache.delete(id);
+      }
+    }
+    
+    // Get fresh entries after removing disposed models
+    const validEntries = Array.from(globalModelCache.entries());
+    
+    // Sort by last used (oldest first)
+    validEntries.sort((a, b) => a[1].lastUsed - b[1].lastUsed);
+    
+    // Remove oldest models until we're back to 8 (keeping 2 buffer)
+    while (validEntries.length > 8) {
+      const [id, entry] = validEntries.shift()!;
+      try {
+        if (!entry.model.isDisposed()) {
+          entry.model.dispose();
+        }
+      } catch (e) {
+        console.warn("Error disposing model during cleanup:", e);
+      } finally {
+        globalModelCache.delete(id);
+      }
+    }
+  } catch (e) {
+    console.error("Error during model cleanup:", e);
+  }
+}
+
+// Export function to clear cache (useful for memory management)
+export function clearModelCache() {
+  try {
+    globalModelCache.forEach(entry => {
+      try {
+        if (!entry.model.isDisposed()) {
+          entry.model.dispose();
+        }
+      } catch (e) {
+        console.warn("Error disposing model during cache clear:", e);
+      }
+    });
+  } catch (e) {
+    console.error("Error clearing model cache:", e);
+  } finally {
+    globalModelCache.clear();
+  }
+}
+
 export function initMonacoSetup() {
   // Skip if already initialized
   if (setupComplete) {

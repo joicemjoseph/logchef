@@ -152,7 +152,7 @@ import { useRoute, useRouter } from 'vue-router';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 
-import { initMonacoSetup, getDefaultMonacoOptions, getSingleLineModeOptions } from "@/utils/monaco";
+import { initMonacoSetup, getDefaultMonacoOptions, getSingleLineModeOptions, getOrCreateGlobalModel } from "@/utils/monaco";
 import { Parser as LogchefQLParser, State as LogchefQLState, Operator as LogchefQLOperator, VALID_KEY_VALUE_OPERATORS as LogchefQLValidOperators, isNumeric } from "@/utils/logchefql";
 import { validateLogchefQLWithDetails } from "@/utils/logchefql/api"; // Import detailed validation
 import { validateSQLWithDetails, SQL_KEYWORDS, CLICKHOUSE_FUNCTIONS, SQL_TYPES } from "@/utils/clickhouse-sql";
@@ -243,9 +243,16 @@ const handleMount = (editor: MonacoEditor) => {
   editorRef.value = editor;
   initMonacoSetup(); // Ensure themes/languages are registered (runs once internally)
 
-  // Use cached model if available
-  const model = getOrCreateModel(editorContent.value, props.activeMode);
-  editor.setModel(model);
+  try {
+    // Use cached model if available, with error handling
+    const model = getOrCreateModel(editorContent.value, props.activeMode);
+    editor.setModel(model);
+  } catch (err) {
+    console.error("Error setting up editor model:", err);
+    // Create a fresh model as fallback
+    const fallbackModel = monaco.editor.createModel(editorContent.value, props.activeMode);
+    editor.setModel(fallbackModel);
+  }
 
   // Check if we should be in read-only mode
   const isLoading = exploreStore.isLoadingOperation('executeQuery');
@@ -664,23 +671,18 @@ const focusEditor = (revealLastPosition = false) => {
 };
 
 
-// Model cache to preserve models between mounts
-const modelCache = new Map<string, monaco.editor.ITextModel>();
+// Track if this is a reactivated instance
+const isReactivated = ref(false);
 
-// Get or create a model from cache
+// Create a function to get a unique model ID
+const getModelId = (language: string, sourceId: number) => {
+  return `${language}-source-${sourceId}`;
+};
+
+// Get or create a model using global cache 
 const getOrCreateModel = (value: string, language: string) => {
-  const key = `${language}-${props.sourceId}`; // Unique key per source
-  if (modelCache.has(key)) {
-    const model = modelCache.get(key)!;
-    // Update model content if needed
-    if (model.getValue() !== value) {
-      model.setValue(value);
-    }
-    return model;
-  }
-  const model = monaco.editor.createModel(value, language);
-  modelCache.set(key, model);
-  return model;
+  const modelId = getModelId(language, props.sourceId);
+  return getOrCreateGlobalModel(modelId, value, language);
 };
 
 // --- Disposal ---
@@ -754,34 +756,113 @@ const safelyDisposeEditor = (fullDisposal = false) => {
 
 // Handle full disposal on unmount
 onBeforeUnmount(() => {
-  safelyDisposeEditor(true); // Full disposal
-});
-
-// Handle lightweight disposal on deactivation (when kept alive)
-onDeactivated(() => {
-  console.log('QueryEditor: Deactivated');
-  if (editorRef.value && !isDisposing.value) {
-    safelyDisposeEditor(false); // Lightweight disposal
+  if (!document.querySelector('.explorer-content-wrapper')?.contains(editorRef.value?.getDomNode() || null)) {
+    // Only fully dispose if not within a kept-alive component
+    safelyDisposeEditor(true); // Full disposal
+  } else {
+    console.log("QueryEditor: Keeping editor intact for KeepAlive");
+    safelyDisposeEditor(false); // Lightweight disposal for KeepAlive
   }
 });
 
-// Handle reactivation
+// Handle lightweight preservation on deactivation (when kept alive)
+onDeactivated(() => {
+  console.log('QueryEditor: Deactivated - preserving editor state');
+  // Instead of disposal, just hide the editor when component is deactivated
+  if (editorRef.value && !isDisposing.value) {
+    const domNode = editorRef.value.getDomNode();
+    if (domNode) {
+      // Hide the editor without disposing it
+      domNode.style.display = 'none';
+      // Pause any expensive background operations
+      editorRef.value.updateOptions({ 
+        readOnly: true,
+        renderValidationDecorations: 'off',
+        renderWhitespace: 'none',
+        renderControlCharacters: false,
+        renderIndentGuides: false,
+        renderLineHighlight: 'none'
+      });
+    }
+  }
+});
+
+// Handle reactivation more efficiently
 onActivated(() => {
-  console.log('QueryEditor: Activated');
+  console.log('QueryEditor: Activated - restoring editor state');
+  isReactivated.value = true;
+  
   if (editorRef.value) {
     const domNode = editorRef.value.getDomNode();
     if (domNode) {
+      // Show the editor again
       domNode.style.display = 'block';
     }
-    editorRef.value.updateOptions({ readOnly: false });
-    editorRef.value.layout();
     
-    // Refresh the editor with current content
-    nextTick(() => {
-      if (editorRef.value) {
-        editorRef.value.focus();
-      }
+    // Re-enable editor features
+    editorRef.value.updateOptions({ 
+      readOnly: false,
+      renderValidationDecorations: 'on',
+      renderWhitespace: 'none',
+      renderControlCharacters: false,
+      renderIndentGuides: true,
+      renderLineHighlight: 'line'
     });
+    
+    // Force layout refresh and focus
+    setTimeout(() => {
+      if (editorRef.value) {
+        editorRef.value.layout();
+        
+        // Update model and reload content if needed
+        const model = editorRef.value.getModel();
+        if (model) {
+          // If content in store differs from editor, update it
+          const storeValue = props.activeMode === 'logchefql'
+            ? exploreStore.logchefqlCode
+            : exploreStore.rawSql;
+            
+          const currentValue = model.getValue();
+          
+          // Force update content - important to fix placeholder rendering issues
+          model.setValue(storeValue || '');
+            
+          // If empty and showing placeholder, force refresh the editor
+          if (!storeValue || storeValue.trim() === '') {
+            // This helps reset any stale Monaco UI elements
+            editorRef.value.updateOptions({ 
+              renderValidationDecorations: 'off'
+            });
+            setTimeout(() => {
+              if (editorRef.value) {
+                editorRef.value.updateOptions({
+                  renderValidationDecorations: 'on'
+                });
+                editorRef.value.layout();
+              }
+            }, 0);
+          }
+        }
+        
+        // Auto-focus the editor after reactivation with a slight delay
+        // to ensure the DOM is fully rendered
+        setTimeout(() => {
+          if (editorRef.value && document.contains(editorRef.value.getDomNode())) {
+            console.log("QueryEditor: Auto-focusing after reactivation");
+            editorRef.value.focus();
+            
+            // Attempt to position cursor at end of content
+            const model = editorRef.value.getModel();
+            if (model) {
+              const lastLine = model.getLineCount();
+              const lastColumn = model.getLineMaxColumn(lastLine);
+              editorRef.value.setPosition({ lineNumber: lastLine, column: lastColumn });
+              editorRef.value.revealPositionInCenter({ lineNumber: lastLine, column: lastColumn });
+            }
+          }
+        }, 100);
+      }
+    }, 10);
   }
 });
 
